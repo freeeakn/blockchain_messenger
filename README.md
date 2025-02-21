@@ -56,6 +56,14 @@ Adds sample encrypted messages between "Danya" and "Asur"
 Prints the blockchain contents and decrypted messages
 Starts a P2P network with three nodes
 
+```bash
+go run ./src -address="localhost:port" -name="Danya"
+```
+
+```bash
+go run ./src -address="localhost:port" -peer="<ip of another peer>:port" -name="Asur" -key="KeyOfAnotherPeer"
+```
+
 ## Project structure
 
   ```bash
