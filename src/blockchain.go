@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// Message represents a chat message
 type Message struct {
 	Sender    string
 	Recipient string
@@ -15,7 +14,6 @@ type Message struct {
 	Timestamp int64
 }
 
-// Block represents a block in our blockchain
 type Block struct {
 	Index     int
 	Timestamp int64
@@ -25,56 +23,45 @@ type Block struct {
 	Nonce     int
 }
 
-// Blockchain holds the chain and related data
 type Blockchain struct {
 	Chain      []Block
 	Difficulty int
 }
 
-// NewBlockchain creates a new blockchain with genesis block
 func NewBlockchain() *Blockchain {
+	// Use a fixed timestamp for the genesis block
 	genesisBlock := Block{
 		Index:     0,
-		Timestamp: time.Now().Unix(),
+		Timestamp: 1677654321, // Fixed timestamp (e.g., Feb 21, 2025)
 		Messages:  []Message{},
 		PrevHash:  "0",
 	}
 	genesisBlock.Hash = calculateHash(genesisBlock)
-
 	return &Blockchain{
 		Chain:      []Block{genesisBlock},
 		Difficulty: 4,
 	}
 }
 
-// calculateHash generates a hash for a block
 func calculateHash(block Block) string {
-	record := fmt.Sprintf("%d%d%v%s%d",
-		block.Index,
-		block.Timestamp,
-		block.Messages,
-		block.PrevHash,
-		block.Nonce)
+	record := fmt.Sprintf("%d%d%v%s%d", block.Index, block.Timestamp, block.Messages, block.PrevHash, block.Nonce)
 	h := sha256.New()
 	h.Write([]byte(record))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// AddMessage adds a new message to the blockchain
 func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) {
 	encryptedContent, err := encryptMessage(content, key)
 	if err != nil {
 		fmt.Println("Encryption error:", err)
 		return
 	}
-
 	newMessage := Message{
 		Sender:    sender,
 		Recipient: recipient,
 		Content:   hex.EncodeToString(encryptedContent),
 		Timestamp: time.Now().Unix(),
 	}
-
 	lastBlock := bc.Chain[len(bc.Chain)-1]
 	newBlock := Block{
 		Index:     lastBlock.Index + 1,
@@ -82,15 +69,12 @@ func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) 
 		Messages:  []Message{newMessage},
 		PrevHash:  lastBlock.Hash,
 	}
-
 	newBlock = mineBlock(newBlock, bc.Difficulty)
 	bc.Chain = append(bc.Chain, newBlock)
 }
 
-// ReadMessages retrieves and decrypts messages for a recipient
 func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 	var messages []string
-
 	for _, block := range bc.Chain {
 		for _, msg := range block.Messages {
 			if msg.Recipient == recipient {
@@ -98,7 +82,6 @@ func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 				if err != nil {
 					continue
 				}
-
 				decrypted, err := decryptMessage(encryptedBytes, key)
 				if err != nil {
 					continue
@@ -110,13 +93,11 @@ func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 	return messages
 }
 
-// mineBlock finds a valid hash for the block
 func mineBlock(block Block, difficulty int) Block {
 	target := ""
-	for range difficulty {
+	for i := 0; i < difficulty; i++ {
 		target += "0"
 	}
-
 	for {
 		hash := calculateHash(block)
 		if hash[:difficulty] == target {
@@ -127,16 +108,11 @@ func mineBlock(block Block, difficulty int) Block {
 	}
 }
 
-// VerifyChain checks the integrity of the blockchain
 func (bc *Blockchain) VerifyChain() bool {
 	for i := 1; i < len(bc.Chain); i++ {
 		current := bc.Chain[i]
 		previous := bc.Chain[i-1]
-
-		if current.Hash != calculateHash(current) {
-			return false
-		}
-		if current.PrevHash != previous.Hash {
+		if current.Hash != calculateHash(current) || current.PrevHash != previous.Hash {
 			return false
 		}
 	}
