@@ -113,7 +113,7 @@ func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 // mineBlock finds a valid hash for the block
 func mineBlock(block Block, difficulty int) Block {
 	target := ""
-	for i := 0; i < difficulty; i++ {
+	for range difficulty {
 		target += "0"
 	}
 

@@ -8,15 +8,18 @@ import (
 
 func main() {
 	bc := NewBlockchain()
+
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	if err != nil {
 		fmt.Println("Error generating key:", err)
 		return
 	}
+
 	bc.AddMessage("Danya", "Asur", "Hello Asur!", key)
 	time.Sleep(time.Second)
 	bc.AddMessage("Asur", "Danya", "Hi Danya, how are you?", key)
+
 	fmt.Println("Blockchain contents (encrypted):")
 	for _, block := range bc.Chain {
 		fmt.Printf("Index: %d\n", block.Index)
@@ -24,19 +27,19 @@ func main() {
 		fmt.Printf("PrevHash: %s\n", block.PrevHash)
 		fmt.Printf("Messages: %v\n\n", block.Messages)
 	}
+
 	fmt.Println("Decrypted messages for Danya:")
-	aliceMessages := bc.ReadMessages("Danya", key)
-	for _, msg := range aliceMessages {
+	for _, msg := range bc.ReadMessages("Danya", key) {
 		fmt.Println(msg)
 	}
 
 	fmt.Println("\nDecrypted messages for Asur:")
-	bobMessages := bc.ReadMessages("Asur", key)
-	for _, msg := range bobMessages {
+	for _, msg := range bc.ReadMessages("Asur", key) {
 		fmt.Println(msg)
 	}
 
 	fmt.Println("\nBlockchain valid?", bc.VerifyChain())
+
 	startNetwork()
 	select {}
 }
