@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -28,11 +29,12 @@ type Blockchain struct {
 	Difficulty int
 }
 
+const GenesisTimestamp = 1677654321 //! Fixed timestamp for consistency
+
 func NewBlockchain() *Blockchain {
-	// Use a fixed timestamp for the genesis block
 	genesisBlock := Block{
 		Index:     0,
-		Timestamp: 1677654321, // Fixed timestamp (e.g., Feb 21, 2025)
+		Timestamp: GenesisTimestamp,
 		Messages:  []Message{},
 		PrevHash:  "0",
 	}
@@ -44,17 +46,16 @@ func NewBlockchain() *Blockchain {
 }
 
 func calculateHash(block Block) string {
-	record := fmt.Sprintf("%d%d%v%s%d", block.Index, block.Timestamp, block.Messages, block.PrevHash, block.Nonce)
-	h := sha256.New()
-	h.Write([]byte(record))
-	return hex.EncodeToString(h.Sum(nil))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d%d%v%s%d", block.Index, block.Timestamp, block.Messages, block.PrevHash, block.Nonce)
+	h := sha256.Sum256([]byte(sb.String()))
+	return hex.EncodeToString(h[:])
 }
 
-func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) {
+func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) error {
 	encryptedContent, err := encryptMessage(content, key)
 	if err != nil {
-		fmt.Println("Encryption error:", err)
-		return
+		return fmt.Errorf("encryption error: %v", err)
 	}
 	newMessage := Message{
 		Sender:    sender,
@@ -71,6 +72,7 @@ func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) 
 	}
 	newBlock = mineBlock(newBlock, bc.Difficulty)
 	bc.Chain = append(bc.Chain, newBlock)
+	return nil
 }
 
 func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
@@ -94,10 +96,7 @@ func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 }
 
 func mineBlock(block Block, difficulty int) Block {
-	target := ""
-	for i := 0; i < difficulty; i++ {
-		target += "0"
-	}
+	target := strings.Repeat("0", difficulty)
 	for {
 		hash := calculateHash(block)
 		if hash[:difficulty] == target {

@@ -1,3 +1,3 @@
-module blockchain_messenger
+module github.com/freeeakn/AetherWave
 
-go 1.23.3
+go 1.23.6

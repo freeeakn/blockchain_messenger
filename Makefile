@@ -1,8 +1,8 @@
 run:
-	go run ./src
+	go run .
 
 build:
-	go build -o blockchapa
+	go build .
 
 test:
-	go test ./src -v -cover
+	go test . -v -cover

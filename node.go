@@ -19,17 +19,24 @@ type NetworkMessage struct {
 }
 
 type Node struct {
-	Address    string
-	Peers      map[string]*net.Conn
-	KnownPeers map[string]PeerInfo
-	Blockchain *Blockchain
-	mutex      sync.Mutex
+	Address         string
+	Peers           map[string]net.Conn
+	KnownPeers      map[string]PeerInfo
+	Blockchain      *Blockchain
+	mutex           sync.Mutex // For peers and knownPeers
+	blockchainMutex sync.Mutex // Dedicated for blockchain
 }
+
+const (
+	DialTimeout           = 5 * time.Second
+	WriteTimeout          = 2 * time.Second
+	PeerBroadcastInterval = 10 * time.Second
+)
 
 func NewNode(address string, bc *Blockchain) *Node {
 	return &Node{
 		Address:    address,
-		Peers:      make(map[string]*net.Conn),
+		Peers:      make(map[string]net.Conn),
 		KnownPeers: make(map[string]PeerInfo),
 		Blockchain: bc,
 	}
@@ -65,13 +72,13 @@ func (n *Node) ConnectToPeer(peerAddress string) error {
 		return nil
 	}
 
-	conn, err := net.Dial("tcp", peerAddress)
+	conn, err := net.DialTimeout("tcp", peerAddress, DialTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %v", peerAddress, err)
 	}
 
 	n.mutex.Lock()
-	n.Peers[peerAddress] = &conn
+	n.Peers[peerAddress] = conn
 	n.KnownPeers[peerAddress] = PeerInfo{Address: peerAddress, LastSeen: time.Now()}
 	n.mutex.Unlock()
 
@@ -126,9 +133,9 @@ func (n *Node) handleConnection(conn net.Conn) {
 }
 
 func (n *Node) broadcastPeerList() {
-	for range time.Tick(10 * time.Second) {
+	for range time.Tick(PeerBroadcastInterval) {
 		n.mutex.Lock()
-		var peerList []string
+		peerList := make([]string, 0, len(n.KnownPeers))
 		for addr := range n.KnownPeers {
 			peerList = append(peerList, addr)
 		}
@@ -152,17 +159,26 @@ func (n *Node) broadcastMessage(msg NetworkMessage) {
 	data = append(data, '\n')
 
 	n.mutex.Lock()
-	defer n.mutex.Unlock()
-
+	peers := make(map[string]net.Conn, len(n.Peers))
 	for addr, conn := range n.Peers {
-		_, err := (*conn).Write(data)
-		if err != nil {
+		peers[addr] = conn
+	}
+	n.mutex.Unlock()
+
+	for addr, conn := range peers {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+		}
+		if _, err := conn.Write(data); err != nil {
 			fmt.Printf("Node %s error sending to %s: %v\n", n.Address, addr, err)
+			n.mutex.Lock()
 			delete(n.Peers, addr)
+			n.mutex.Unlock()
 			continue
 		}
 		fmt.Printf("Node %s sent %s to %s\n", n.Address, msg.Type, addr)
 	}
+	fmt.Printf("Node %s completed broadcasting %s\n", n.Address, msg.Type)
 }
 
 func (n *Node) handlePeerList(peers []string) {
@@ -178,8 +194,8 @@ func (n *Node) handlePeerList(peers []string) {
 }
 
 func (n *Node) handleNewBlock(block Block) {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
+	n.blockchainMutex.Lock()
+	defer n.blockchainMutex.Unlock()
 
 	lastBlock := n.Blockchain.Chain[len(n.Blockchain.Chain)-1]
 	fmt.Printf("Node %s processing new block %d (PrevHash: %s, Expected: %s)\n",
@@ -192,13 +208,19 @@ func (n *Node) handleNewBlock(block Block) {
 		return
 	}
 
+	if block.Index <= lastBlock.Index {
+		fmt.Printf("Node %s ignored block %d: already have block at index %d or earlier\n",
+			n.Address, block.Index, lastBlock.Index)
+		return
+	}
+
 	if block.Index == lastBlock.Index+1 && block.PrevHash == lastBlock.Hash {
 		n.Blockchain.Chain = append(n.Blockchain.Chain, block)
 		fmt.Printf("Node %s accepted new block %d\n", n.Address, block.Index)
-		n.BroadcastBlock(block)
+		go n.BroadcastBlock(block)
 	} else {
-		fmt.Printf("Node %s rejected block %d: out of sync (index %d, prevHash mismatch)\n",
-			n.Address, block.Index, block.Index)
+		fmt.Printf("Node %s out of sync for block %d (index %d vs %d, prevHash mismatch)\n",
+			n.Address, block.Index, block.Index, lastBlock.Index+1)
 		n.requestChainFromPeers()
 	}
 }
@@ -216,12 +238,19 @@ func (n *Node) requestChain(peerAddress string) {
 		Type:    "chain_request",
 		Payload: nil,
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Node %s error marshaling chain request: %v\n", n.Address, err)
+		return
+	}
 	data = append(data, '\n')
 
 	n.mutex.Lock()
 	if conn, exists := n.Peers[peerAddress]; exists {
-		(*conn).Write(data)
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+		}
+		conn.Write(data)
 		fmt.Printf("Node %s requested chain from %s\n", n.Address, peerAddress)
 	}
 	n.mutex.Unlock()
@@ -241,23 +270,31 @@ func (n *Node) requestChainFromPeers() {
 }
 
 func (n *Node) sendChain(conn net.Conn) {
-	n.mutex.Lock()
-	chain := n.Blockchain.Chain
-	n.mutex.Unlock()
+	n.blockchainMutex.Lock()
+	chain := make([]Block, len(n.Blockchain.Chain))
+	copy(chain, n.Blockchain.Chain)
+	n.blockchainMutex.Unlock()
 
 	msg := NetworkMessage{
 		Type:    "chain_response",
 		Payload: mustMarshal(chain),
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Node %s error marshaling chain response: %v\n", n.Address, err)
+		return
+	}
 	data = append(data, '\n')
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	}
 	conn.Write(data)
 	fmt.Printf("Node %s sent chain (length %d) to %s\n", n.Address, len(chain), conn.RemoteAddr().String())
 }
 
 func (n *Node) handleChainResponse(chain []Block) {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
+	n.blockchainMutex.Lock()
+	defer n.blockchainMutex.Unlock()
 
 	currentLength := len(n.Blockchain.Chain)
 	newLength := len(chain)
@@ -269,7 +306,7 @@ func (n *Node) handleChainResponse(chain []Block) {
 	}
 
 	valid := true
-	expectedPrevHash := "0" // For genesis block
+	expectedPrevHash := "0"
 	for i, block := range chain {
 		if block.PrevHash != expectedPrevHash {
 			valid = false
@@ -296,7 +333,7 @@ func (n *Node) handleChainResponse(chain []Block) {
 func mustMarshal(v interface{}) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
-		fmt.Println("Error marshaling:", err)
+		fmt.Printf("Error marshaling: %v\n", err)
 		return nil
 	}
 	return data
