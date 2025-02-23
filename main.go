@@ -36,7 +36,6 @@ func main() {
 		fmt.Printf("Generated key (share this with peers): %s\n", hex.EncodeToString(key))
 	}
 
-	// Use the peer flag as a bootstrap peer
 	var bootstrapPeers []string
 	if *peer != "" {
 		bootstrapPeers = []string{*peer}
@@ -94,11 +93,24 @@ func main() {
 			}
 			miningDuration := time.Since(startTime)
 			fmt.Printf("Message sent and block mined in %v\n", miningDuration)
+
+			// Broadcast the new block
+			node.blockchainMutex.Lock()
 			newBlock := node.Blockchain.Chain[len(node.Blockchain.Chain)-1]
+			node.blockchainMutex.Unlock()
+
+			broadcastChan := make(chan bool, 1)
 			go func() {
 				node.BroadcastBlock(newBlock)
-				fmt.Println("Broadcast completed")
+				broadcastChan <- true
 			}()
+
+			select {
+			case <-broadcastChan:
+				fmt.Println("Message broadcast completed")
+			case <-time.After(10 * time.Second):
+				fmt.Println("Timeout broadcasting message - network issue")
+			}
 
 		case "read":
 			fmt.Println("Processing 'read' command...")

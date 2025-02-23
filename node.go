@@ -15,7 +15,7 @@ type PeerInfo struct {
 }
 
 type NetworkMessage struct {
-	Type    string // "peer_list", "new_block", "chain_request", "chain_response", "ping"
+	Type    string
 	Payload json.RawMessage
 }
 
@@ -35,6 +35,8 @@ const (
 	PeerBroadcastInterval = 10 * time.Second
 	PeerProbeInterval     = 30 * time.Second
 	PeerTimeout           = 15 * time.Second
+	BroadcastRetryDelay   = 1 * time.Second
+	MaxBroadcastRetries   = 3
 )
 
 func NewNode(address string, bc *Blockchain, bootstrapPeers []string) *Node {
@@ -278,7 +280,7 @@ func (n *Node) broadcastMessage(msg NetworkMessage) {
 			tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 		}
 		if _, err := conn.Write(data); err != nil {
-			fmt.Printf("Node %s error sending to %s: %v\n", n.Address, addr, err)
+			fmt.Printf("Node %s error sending %s to %s: %v\n", n.Address, msg.Type, addr, err)
 			n.disconnectPeer(addr)
 			continue
 		}
@@ -314,14 +316,12 @@ func (n *Node) updatePeerStatus(peerAddress string, active bool) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	if info, exists := n.KnownPeers[peerAddress]; exists {
-		// Use info to update only LastSeen and Active, preserving Address
 		n.KnownPeers[peerAddress] = PeerInfo{
 			Address:  info.Address,
 			LastSeen: time.Now(),
 			Active:   active,
 		}
 	} else {
-		// If peer doesn't exist, add it
 		n.KnownPeers[peerAddress] = PeerInfo{
 			Address:  peerAddress,
 			LastSeen: time.Now(),
@@ -354,7 +354,7 @@ func (n *Node) handleNewBlock(block Block) {
 	if block.Index == lastBlock.Index+1 && block.PrevHash == lastBlock.Hash {
 		n.Blockchain.Chain = append(n.Blockchain.Chain, block)
 		fmt.Printf("Node %s accepted new block %d\n", n.Address, block.Index)
-		go n.BroadcastBlock(block)
+		go n.BroadcastBlockWithRetry(block) // Enhanced broadcast with retry
 	} else {
 		fmt.Printf("Node %s out of sync for block %d (index %d vs %d, prevHash mismatch)\n",
 			n.Address, block.Index, block.Index, lastBlock.Index+1)
@@ -368,6 +368,64 @@ func (n *Node) BroadcastBlock(block Block) {
 		Payload: mustMarshal(block),
 	}
 	n.broadcastMessage(msg)
+}
+
+func (n *Node) BroadcastBlockWithRetry(block Block) {
+	msg := NetworkMessage{
+		Type:    "new_block",
+		Payload: mustMarshal(block),
+	}
+	n.broadcastMessageWithRetry(msg, MaxBroadcastRetries)
+}
+
+func (n *Node) broadcastMessageWithRetry(msg NetworkMessage, retries int) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Node %s error marshaling message: %v\n", n.Address, err)
+		return
+	}
+	data = append(data, '\n')
+
+	n.mutex.Lock()
+	peers := make(map[string]net.Conn, len(n.Peers))
+	for addr, conn := range n.Peers {
+		peers[addr] = conn
+	}
+	n.mutex.Unlock()
+
+	failedPeers := make(map[string]bool)
+	for attempt := 0; attempt <= retries; attempt++ {
+		for addr, conn := range peers {
+			if failedPeers[addr] {
+				continue // Skip already failed peers in this retry cycle
+			}
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+			}
+			if _, err := conn.Write(data); err != nil {
+				fmt.Printf("Node %s error sending %s to %s (attempt %d/%d): %v\n", n.Address, msg.Type, addr, attempt+1, retries+1, err)
+				failedPeers[addr] = true
+				if attempt == retries {
+					n.disconnectPeer(addr)
+				}
+				continue
+			}
+			fmt.Printf("Node %s sent %s to %s (attempt %d/%d)\n", n.Address, msg.Type, addr, attempt+1, retries+1)
+			delete(failedPeers, addr) // Success, remove from failed list
+		}
+		if len(failedPeers) == 0 {
+			break // All peers succeeded
+		}
+		if attempt < retries {
+			fmt.Printf("Node %s retrying broadcast to %d failed peers after %v\n", n.Address, len(failedPeers), BroadcastRetryDelay)
+			time.Sleep(BroadcastRetryDelay)
+		}
+	}
+	if len(failedPeers) > 0 {
+		fmt.Printf("Node %s failed to broadcast %s to %d peers after %d retries\n", n.Address, msg.Type, len(failedPeers), retries+1)
+	} else {
+		fmt.Printf("Node %s completed broadcasting %s to all peers\n", n.Address, msg.Type)
+	}
 }
 
 func (n *Node) requestChain(peerAddress string) {
