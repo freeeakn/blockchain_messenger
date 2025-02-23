@@ -36,8 +36,14 @@ func main() {
 		fmt.Printf("Generated key (share this with peers): %s\n", hex.EncodeToString(key))
 	}
 
+	// Use the peer flag as a bootstrap peer
+	var bootstrapPeers []string
+	if *peer != "" {
+		bootstrapPeers = []string{*peer}
+	}
+
 	bc := NewBlockchain()
-	node := NewNode(*address, bc)
+	node := NewNode(*address, bc, bootstrapPeers)
 	go node.Start()
 
 	if *peer != "" {
@@ -172,7 +178,11 @@ func main() {
 			defer node.mutex.Unlock()
 			fmt.Println("Known peers:")
 			for addr, info := range node.KnownPeers {
-				fmt.Printf("  %s (Last seen: %v)\n", addr, info.LastSeen)
+				status := "inactive"
+				if info.Active {
+					status = "active"
+				}
+				fmt.Printf("  %s (Last seen: %v, Status: %s)\n", addr, info.LastSeen, status)
 			}
 			fmt.Println("Peers command completed")
 

@@ -11,10 +11,11 @@ import (
 type PeerInfo struct {
 	Address  string
 	LastSeen time.Time
+	Active   bool
 }
 
 type NetworkMessage struct {
-	Type    string // "peer_list", "new_block", "chain_request", "chain_response"
+	Type    string // "peer_list", "new_block", "chain_request", "chain_response", "ping"
 	Payload json.RawMessage
 }
 
@@ -23,22 +24,26 @@ type Node struct {
 	Peers           map[string]net.Conn
 	KnownPeers      map[string]PeerInfo
 	Blockchain      *Blockchain
-	mutex           sync.Mutex // For peers and knownPeers
-	blockchainMutex sync.Mutex // Dedicated for blockchain
+	mutex           sync.Mutex
+	blockchainMutex sync.Mutex
+	bootstrapPeers  []string
 }
 
 const (
 	DialTimeout           = 5 * time.Second
 	WriteTimeout          = 2 * time.Second
 	PeerBroadcastInterval = 10 * time.Second
+	PeerProbeInterval     = 30 * time.Second
+	PeerTimeout           = 15 * time.Second
 )
 
-func NewNode(address string, bc *Blockchain) *Node {
+func NewNode(address string, bc *Blockchain, bootstrapPeers []string) *Node {
 	return &Node{
-		Address:    address,
-		Peers:      make(map[string]net.Conn),
-		KnownPeers: make(map[string]PeerInfo),
-		Blockchain: bc,
+		Address:        address,
+		Peers:          make(map[string]net.Conn),
+		KnownPeers:     make(map[string]PeerInfo),
+		Blockchain:     bc,
+		bootstrapPeers: bootstrapPeers,
 	}
 }
 
@@ -51,10 +56,12 @@ func (n *Node) Start() {
 	fmt.Printf("Node %s started, listening on %s\n", n.Address, n.Address)
 
 	n.mutex.Lock()
-	n.KnownPeers[n.Address] = PeerInfo{Address: n.Address, LastSeen: time.Now()}
+	n.KnownPeers[n.Address] = PeerInfo{Address: n.Address, LastSeen: time.Now(), Active: true}
 	n.mutex.Unlock()
 
+	go n.bootstrapDiscovery()
 	go n.broadcastPeerList()
+	go n.probePeers()
 
 	for {
 		conn, err := ln.Accept()
@@ -67,24 +74,40 @@ func (n *Node) Start() {
 	}
 }
 
+func (n *Node) bootstrapDiscovery() {
+	for _, peerAddr := range n.bootstrapPeers {
+		if peerAddr != n.Address {
+			n.ConnectToPeer(peerAddr)
+		}
+	}
+}
+
 func (n *Node) ConnectToPeer(peerAddress string) error {
 	if peerAddress == n.Address {
 		return nil
 	}
 
+	n.mutex.Lock()
+	if _, exists := n.KnownPeers[peerAddress]; exists && n.KnownPeers[peerAddress].Active {
+		n.mutex.Unlock()
+		return nil
+	}
+	n.mutex.Unlock()
+
 	conn, err := net.DialTimeout("tcp", peerAddress, DialTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %v", peerAddress, err)
+		fmt.Printf("Node %s failed to connect to %s: %v\n", n.Address, peerAddress, err)
+		n.updatePeerStatus(peerAddress, false)
+		return err
 	}
 
 	n.mutex.Lock()
 	n.Peers[peerAddress] = conn
-	n.KnownPeers[peerAddress] = PeerInfo{Address: peerAddress, LastSeen: time.Now()}
+	n.KnownPeers[peerAddress] = PeerInfo{Address: peerAddress, LastSeen: time.Now(), Active: true}
 	n.mutex.Unlock()
 
 	fmt.Printf("Node %s connected to peer %s\n", n.Address, peerAddress)
 	n.requestChain(peerAddress)
-
 	go n.handleConnection(conn)
 	return nil
 }
@@ -92,17 +115,20 @@ func (n *Node) ConnectToPeer(peerAddress string) error {
 func (n *Node) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	decoder := json.NewDecoder(conn)
+	remoteAddr := conn.RemoteAddr().String()
 
 	for {
 		var msg NetworkMessage
 		if err := decoder.Decode(&msg); err != nil {
 			if err.Error() != "EOF" {
-				fmt.Printf("Node %s error decoding message from %s: %v\n", n.Address, conn.RemoteAddr().String(), err)
+				fmt.Printf("Node %s error decoding message from %s: %v\n", n.Address, remoteAddr, err)
 			}
+			n.updatePeerStatus(remoteAddr, false)
 			return
 		}
 
-		fmt.Printf("Node %s received message type %s from %s\n", n.Address, msg.Type, conn.RemoteAddr().String())
+		n.updatePeerStatus(remoteAddr, true)
+		fmt.Printf("Node %s received message type %s from %s\n", n.Address, msg.Type, remoteAddr)
 
 		switch msg.Type {
 		case "peer_list":
@@ -128,6 +154,10 @@ func (n *Node) handleConnection(conn net.Conn) {
 				continue
 			}
 			n.handleChainResponse(chain)
+		case "ping":
+			n.sendPong(conn)
+		case "pong":
+			n.updatePeerStatus(remoteAddr, true)
 		}
 	}
 }
@@ -135,19 +165,97 @@ func (n *Node) handleConnection(conn net.Conn) {
 func (n *Node) broadcastPeerList() {
 	for range time.Tick(PeerBroadcastInterval) {
 		n.mutex.Lock()
-		peerList := make([]string, 0, len(n.KnownPeers))
-		for addr := range n.KnownPeers {
-			peerList = append(peerList, addr)
+		activePeers := make([]string, 0, len(n.KnownPeers))
+		for addr, info := range n.KnownPeers {
+			if info.Active {
+				activePeers = append(activePeers, addr)
+			}
 		}
 		n.mutex.Unlock()
 
-		msg := NetworkMessage{
-			Type:    "peer_list",
-			Payload: mustMarshal(peerList),
+		if len(activePeers) > 0 {
+			msg := NetworkMessage{
+				Type:    "peer_list",
+				Payload: mustMarshal(activePeers),
+			}
+			n.broadcastMessage(msg)
+		}
+	}
+}
+
+func (n *Node) probePeers() {
+	for range time.Tick(PeerProbeInterval) {
+		n.mutex.Lock()
+		peers := make([]string, 0, len(n.Peers))
+		for addr := range n.Peers {
+			peers = append(peers, addr)
+		}
+		n.mutex.Unlock()
+
+		for _, addr := range peers {
+			n.sendPing(addr)
 		}
 
-		n.broadcastMessage(msg)
+		n.mutex.Lock()
+		now := time.Now()
+		for addr, info := range n.KnownPeers {
+			if info.Active && now.Sub(info.LastSeen) > PeerTimeout {
+				fmt.Printf("Node %s marking peer %s as inactive (last seen: %v)\n", n.Address, addr, info.LastSeen)
+				n.KnownPeers[addr] = PeerInfo{Address: addr, LastSeen: info.LastSeen, Active: false}
+				n.mutex.Unlock()
+				n.disconnectPeer(addr)
+				n.mutex.Lock()
+			}
+		}
+		n.mutex.Unlock()
 	}
+}
+
+func (n *Node) sendPing(peerAddress string) {
+	msg := NetworkMessage{
+		Type:    "ping",
+		Payload: nil,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Node %s error marshaling ping: %v\n", n.Address, err)
+		return
+	}
+	data = append(data, '\n')
+
+	n.mutex.Lock()
+	conn, exists := n.Peers[peerAddress]
+	n.mutex.Unlock()
+	if !exists {
+		return
+	}
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	}
+	if _, err := conn.Write(data); err != nil {
+		fmt.Printf("Node %s error sending ping to %s: %v\n", n.Address, peerAddress, err)
+		n.updatePeerStatus(peerAddress, false)
+		n.disconnectPeer(peerAddress)
+	}
+}
+
+func (n *Node) sendPong(conn net.Conn) {
+	msg := NetworkMessage{
+		Type:    "pong",
+		Payload: nil,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Node %s error marshaling pong: %v\n", n.Address, err)
+		return
+	}
+	data = append(data, '\n')
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	}
+	conn.Write(data)
 }
 
 func (n *Node) broadcastMessage(msg NetworkMessage) {
@@ -171,14 +279,23 @@ func (n *Node) broadcastMessage(msg NetworkMessage) {
 		}
 		if _, err := conn.Write(data); err != nil {
 			fmt.Printf("Node %s error sending to %s: %v\n", n.Address, addr, err)
-			n.mutex.Lock()
-			delete(n.Peers, addr)
-			n.mutex.Unlock()
+			n.disconnectPeer(addr)
 			continue
 		}
 		fmt.Printf("Node %s sent %s to %s\n", n.Address, msg.Type, addr)
 	}
-	fmt.Printf("Node %s completed broadcasting %s\n", n.Address, msg.Type)
+	if msg.Type != "ping" && msg.Type != "pong" {
+		fmt.Printf("Node %s completed broadcasting %s\n", n.Address, msg.Type)
+	}
+}
+
+func (n *Node) disconnectPeer(peerAddress string) {
+	n.mutex.Lock()
+	if conn, exists := n.Peers[peerAddress]; exists {
+		conn.Close()
+		delete(n.Peers, peerAddress)
+	}
+	n.mutex.Unlock()
 }
 
 func (n *Node) handlePeerList(peers []string) {
@@ -187,8 +304,28 @@ func (n *Node) handlePeerList(peers []string) {
 
 	for _, addr := range peers {
 		if _, exists := n.KnownPeers[addr]; !exists {
-			n.KnownPeers[addr] = PeerInfo{Address: addr, LastSeen: time.Now()}
+			n.KnownPeers[addr] = PeerInfo{Address: addr, LastSeen: time.Now(), Active: false}
 			go n.ConnectToPeer(addr)
+		}
+	}
+}
+
+func (n *Node) updatePeerStatus(peerAddress string, active bool) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	if info, exists := n.KnownPeers[peerAddress]; exists {
+		// Use info to update only LastSeen and Active, preserving Address
+		n.KnownPeers[peerAddress] = PeerInfo{
+			Address:  info.Address,
+			LastSeen: time.Now(),
+			Active:   active,
+		}
+	} else {
+		// If peer doesn't exist, add it
+		n.KnownPeers[peerAddress] = PeerInfo{
+			Address:  peerAddress,
+			LastSeen: time.Now(),
+			Active:   active,
 		}
 	}
 }

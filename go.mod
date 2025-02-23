@@ -1,3 +1,3 @@
 module github.com/freeeakn/AetherWave
 
-go 1.23.6
+go 1.23.3
