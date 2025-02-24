@@ -57,11 +57,11 @@ Prints the blockchain contents and decrypted messages
 Starts a P2P network with three nodes
 
 ```bash
-go run ./src -address="localhost:port" -name="Danya"
+go run . -address="localhost:port" -name="Danya"
 ```
 
 ```bash
-go run ./src -address="localhost:port" -peer="<ip of another peer>:port" -name="Asur" -key="KeyOfAnotherPeer"
+go run . -address="localhost:port" -peer="<ip of another peer>:port" -name="Asur" -key="KeyOfAnotherPeer"
 ```
 
 ## Project structure
