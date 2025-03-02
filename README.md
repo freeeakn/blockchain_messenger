@@ -40,20 +40,20 @@ The system is split into several main components:
 
 ### Installation
 
-1. Clone the repository:
+Clone the repository:
 
 ```bash
 git clone https://github.com/freeeakn/AetherWave.git
 cd AetherWave
 ```
 
-2. Install dependencies:
+Install dependencies:
 
 ```bash
 make install-deps
 ```
 
-3. Build the project:
+Build the project:
 
 ```bash
 make build
@@ -139,6 +139,7 @@ make test-with-script
 ```
 
 This option runs tests using a special script that:
+
 - Generates detailed logs for each test
 - Creates code coverage reports
 - Records error information in a separate file
@@ -187,17 +188,17 @@ This will open the web interface in your default browser.
 ## 📂 Project Structure
 
 - `cmd/` - Executable files
-  - `aetherwave/` - Main application entry point
+    - `aetherwave/` - Main application entry point
 - `pkg/` - Core packages
-  - `blockchain/` - Blockchain implementation with caching
+    - `blockchain/` - Blockchain implementation with caching
     - `blockchain.go`: Main blockchain structure and methods
     - `mining.go`: Block mining and proof-of-work
     - `cache.go`: Caching layer for blockchain operations
-  - `crypto/` - Cryptographic functions
-  - `network/` - Network interaction
-    - `node.go`: Node implementation for P2P communication
-    - `discovery.go`: Automatic node discovery using mDNS
-  - `sdk/` - Software Development Kit
+    - `crypto/` - Cryptographic functions
+    - `network/` - Network interaction
+        - `node.go`: Node implementation for P2P communication
+        - `discovery.go`: Automatic node discovery using mDNS
+    - `sdk/` - Software Development Kit
 - `mobile/` - Mobile integration examples
 - `web/` - Web interface
 - `tests/` - Integration tests
