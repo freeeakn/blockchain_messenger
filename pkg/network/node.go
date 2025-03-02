@@ -1,4 +1,4 @@
-package main
+package network
 
 import (
 	"encoding/json"
@@ -6,8 +6,11 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/freeeakn/AetherWave/pkg/blockchain"
 )
 
+// PeerInfo содержит информацию о пире
 type PeerInfo struct {
 	Address     string
 	LastSeen    time.Time
@@ -15,21 +18,26 @@ type PeerInfo struct {
 	FailedPings int
 }
 
+// NetworkMessage представляет сообщение, передаваемое по сети
 type NetworkMessage struct {
 	Type    string
 	Payload json.RawMessage
 }
 
+// Node представляет узел в сети
 type Node struct {
-	Address         string
-	Peers           map[string]net.Conn
-	KnownPeers      map[string]PeerInfo
-	Blockchain      *Blockchain
-	mutex           sync.Mutex
-	blockchainMutex sync.Mutex
-	bootstrapPeers  []string
+	Address        string
+	Peers          map[string]net.Conn
+	KnownPeers     map[string]PeerInfo
+	Blockchain     *blockchain.Blockchain
+	mutex          sync.RWMutex
+	bootstrapPeers []string
+	listener       net.Listener
+	shutdown       chan struct{}
+	isRunning      bool
 }
 
+// Константы для настройки сетевого взаимодействия
 const (
 	DialTimeout           = 5 * time.Second
 	WriteTimeout          = 2 * time.Second
@@ -41,22 +49,37 @@ const (
 	MaxFailedPings        = 3
 )
 
-func NewNode(address string, bc *Blockchain, bootstrapPeers []string) *Node {
+// DialPeer - функция для установки соединения с пиром
+// Экспортирована для возможности замены в тестах
+var DialPeer = func(address string) (net.Conn, error) {
+	return net.DialTimeout("tcp", address, DialTimeout)
+}
+
+// NewNode создает новый экземпляр узла
+func NewNode(address string, bc *blockchain.Blockchain, bootstrapPeers []string) *Node {
 	return &Node{
 		Address:        address,
 		Peers:          make(map[string]net.Conn),
 		KnownPeers:     make(map[string]PeerInfo),
 		Blockchain:     bc,
 		bootstrapPeers: bootstrapPeers,
+		shutdown:       make(chan struct{}),
 	}
 }
 
-func (n *Node) Start() {
+// Start запускает узел и начинает прослушивание входящих соединений
+func (n *Node) Start() error {
+	if n.isRunning {
+		return fmt.Errorf("node is already running")
+	}
+
 	ln, err := net.Listen("tcp", n.Address)
 	if err != nil {
-		fmt.Println("Error starting node:", err)
-		return
+		return fmt.Errorf("error starting node: %v", err)
 	}
+	n.listener = ln
+	n.isRunning = true
+
 	fmt.Printf("Node %s started, listening on %s\n", n.Address, n.Address)
 
 	n.mutex.Lock()
@@ -66,19 +89,59 @@ func (n *Node) Start() {
 	go n.bootstrapDiscovery()
 	go n.broadcastPeerList()
 	go n.probePeers()
+	go n.acceptConnections()
 
+	return nil
+}
+
+// Stop останавливает узел и закрывает все соединения
+func (n *Node) Stop() {
+	if !n.isRunning {
+		return
+	}
+
+	close(n.shutdown)
+	if n.listener != nil {
+		n.listener.Close()
+	}
+
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	for addr, conn := range n.Peers {
+		conn.Close()
+		delete(n.Peers, addr)
+	}
+	n.isRunning = false
+	fmt.Printf("Node %s stopped\n", n.Address)
+}
+
+// acceptConnections обрабатывает входящие соединения
+func (n *Node) acceptConnections() {
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
+		select {
+		case <-n.shutdown:
+			return
+		default:
+			conn, err := n.listener.Accept()
+			if err != nil {
+				select {
+				case <-n.shutdown:
+					return
+				default:
+					fmt.Println("Error accepting connection:", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
+			remoteAddr := conn.RemoteAddr().String()
+			fmt.Printf("Node %s accepted connection from %s\n", n.Address, remoteAddr)
+			go n.handleConnection(conn, remoteAddr)
 		}
-		remoteAddr := conn.RemoteAddr().String()
-		fmt.Printf("Node %s accepted connection from %s\n", n.Address, remoteAddr)
-		go n.handleConnection(conn, remoteAddr)
 	}
 }
 
+// bootstrapDiscovery подключается к начальным пирам
 func (n *Node) bootstrapDiscovery() {
 	for _, peerAddr := range n.bootstrapPeers {
 		if peerAddr != n.Address {
@@ -87,19 +150,20 @@ func (n *Node) bootstrapDiscovery() {
 	}
 }
 
+// ConnectToPeer устанавливает соединение с пиром
 func (n *Node) ConnectToPeer(peerAddress string) error {
 	if peerAddress == n.Address {
 		return nil
 	}
 
-	n.mutex.Lock()
+	n.mutex.RLock()
 	if info, exists := n.KnownPeers[peerAddress]; exists && info.Active {
-		n.mutex.Unlock()
+		n.mutex.RUnlock()
 		return nil
 	}
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 
-	conn, err := net.DialTimeout("tcp", peerAddress, DialTimeout)
+	conn, err := DialPeer(peerAddress)
 	if err != nil {
 		fmt.Printf("Node %s failed to connect to %s: %v\n", n.Address, peerAddress, err)
 		n.updatePeerStatus(peerAddress, false, true)
@@ -117,11 +181,12 @@ func (n *Node) ConnectToPeer(peerAddress string) error {
 	return nil
 }
 
+// handleConnection обрабатывает соединение с пиром
 func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 	defer conn.Close()
 	decoder := json.NewDecoder(conn)
 
-	// Start with a placeholder; we'll refine it with the listening address
+	// Начинаем с заполнителя; уточним его с адресом прослушивания
 	peerAddr := ""
 
 	for {
@@ -137,13 +202,13 @@ func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 			return
 		}
 
-		// Use peer_list to identify the listening address
+		// Используем peer_list для идентификации адреса прослушивания
 		if msg.Type == "peer_list" {
 			var peers []string
 			if err := json.Unmarshal(msg.Payload, &peers); err == nil {
 				for _, addr := range peers {
 					if addr != n.Address && !isEphemeralPort(addr) {
-						peerAddr = addr // Assume this is the sender's listening address
+						peerAddr = addr // Предполагаем, что это адрес прослушивания отправителя
 						n.mutex.Lock()
 						if _, exists := n.Peers[peerAddr]; !exists {
 							n.Peers[peerAddr] = conn
@@ -156,7 +221,7 @@ func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 			}
 		}
 
-		// Fallback to initial address if not yet identified
+		// Используем начальный адрес, если еще не идентифицирован
 		if peerAddr == "" {
 			peerAddr = initialRemoteAddr
 		}
@@ -173,7 +238,7 @@ func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 			}
 			n.handlePeerList(peers)
 		case "new_block":
-			var block Block
+			var block blockchain.Block
 			if err := json.Unmarshal(msg.Payload, &block); err != nil {
 				fmt.Println("Error unmarshaling new block:", err)
 				continue
@@ -182,7 +247,7 @@ func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 		case "chain_request":
 			n.sendChain(conn)
 		case "chain_response":
-			var chain []Block
+			var chain []blockchain.Block
 			if err := json.Unmarshal(msg.Payload, &chain); err != nil {
 				fmt.Println("Error unmarshaling chain response:", err)
 				continue
@@ -196,69 +261,88 @@ func (n *Node) handleConnection(conn net.Conn, initialRemoteAddr string) {
 	}
 }
 
+// broadcastPeerList периодически рассылает список известных пиров
 func (n *Node) broadcastPeerList() {
-	for range time.Tick(PeerBroadcastInterval) {
-		n.mutex.Lock()
-		activePeers := make([]string, 0, len(n.KnownPeers))
-		for addr, info := range n.KnownPeers {
-			if info.Active && addr != n.Address {
-				activePeers = append(activePeers, addr)
-			}
-		}
-		n.mutex.Unlock()
+	ticker := time.NewTicker(PeerBroadcastInterval)
+	defer ticker.Stop()
 
-		if len(activePeers) > 0 {
-			msg := NetworkMessage{
-				Type:    "peer_list",
-				Payload: mustMarshal(activePeers),
+	for {
+		select {
+		case <-n.shutdown:
+			return
+		case <-ticker.C:
+			n.mutex.RLock()
+			activePeers := make([]string, 0, len(n.KnownPeers))
+			for addr, info := range n.KnownPeers {
+				if info.Active && addr != n.Address {
+					activePeers = append(activePeers, addr)
+				}
 			}
-			n.broadcastMessage(msg)
+			n.mutex.RUnlock()
+
+			if len(activePeers) > 0 {
+				msg := NetworkMessage{
+					Type:    "peer_list",
+					Payload: mustMarshal(activePeers),
+				}
+				n.broadcastMessage(msg)
+			}
 		}
 	}
 }
 
+// probePeers периодически проверяет доступность пиров
 func (n *Node) probePeers() {
-	for range time.Tick(PeerProbeInterval) {
-		n.mutex.Lock()
-		peers := make([]string, 0, len(n.Peers))
-		for addr := range n.Peers {
-			if addr != n.Address {
-				peers = append(peers, addr)
-			}
-		}
-		n.mutex.Unlock()
+	ticker := time.NewTicker(PeerProbeInterval)
+	defer ticker.Stop()
 
-		for _, addr := range peers {
-			n.sendPing(addr)
-		}
-
-		n.mutex.Lock()
-		now := time.Now()
-		for addr, info := range n.KnownPeers {
-			if addr == n.Address {
-				continue
-			}
-			if info.Active && now.Sub(info.LastSeen) > PeerTimeout {
-				n.KnownPeers[addr] = PeerInfo{
-					Address:     info.Address,
-					LastSeen:    info.LastSeen,
-					Active:      info.Active,
-					FailedPings: info.FailedPings + 1,
-				}
-				fmt.Printf("Node %s recorded failed ping for %s (count: %d)\n", n.Address, addr, n.KnownPeers[addr].FailedPings)
-				if n.KnownPeers[addr].FailedPings >= MaxFailedPings {
-					fmt.Printf("Node %s marking peer %s as inactive after %d failed pings (last seen: %v)\n", n.Address, addr, MaxFailedPings, info.LastSeen)
-					n.KnownPeers[addr] = PeerInfo{Address: addr, LastSeen: info.LastSeen, Active: false, FailedPings: info.FailedPings}
-					n.mutex.Unlock()
-					n.disconnectPeer(addr)
-					n.mutex.Lock()
+	for {
+		select {
+		case <-n.shutdown:
+			return
+		case <-ticker.C:
+			n.mutex.RLock()
+			peers := make([]string, 0, len(n.Peers))
+			for addr := range n.Peers {
+				if addr != n.Address {
+					peers = append(peers, addr)
 				}
 			}
+			n.mutex.RUnlock()
+
+			for _, addr := range peers {
+				n.sendPing(addr)
+			}
+
+			n.mutex.Lock()
+			now := time.Now()
+			for addr, info := range n.KnownPeers {
+				if addr == n.Address {
+					continue
+				}
+				if info.Active && now.Sub(info.LastSeen) > PeerTimeout {
+					n.KnownPeers[addr] = PeerInfo{
+						Address:     info.Address,
+						LastSeen:    info.LastSeen,
+						Active:      info.Active,
+						FailedPings: info.FailedPings + 1,
+					}
+					fmt.Printf("Node %s recorded failed ping for %s (count: %d)\n", n.Address, addr, n.KnownPeers[addr].FailedPings)
+					if n.KnownPeers[addr].FailedPings >= MaxFailedPings {
+						fmt.Printf("Node %s marking peer %s as inactive after %d failed pings (last seen: %v)\n", n.Address, addr, MaxFailedPings, info.LastSeen)
+						n.KnownPeers[addr] = PeerInfo{Address: addr, LastSeen: info.LastSeen, Active: false, FailedPings: info.FailedPings}
+						n.mutex.Unlock()
+						n.disconnectPeer(addr)
+						n.mutex.Lock()
+					}
+				}
+			}
+			n.mutex.Unlock()
 		}
-		n.mutex.Unlock()
 	}
 }
 
+// sendPing отправляет ping-сообщение пиру
 func (n *Node) sendPing(peerAddress string) {
 	msg := NetworkMessage{
 		Type:    "ping",
@@ -271,9 +355,9 @@ func (n *Node) sendPing(peerAddress string) {
 	}
 	data = append(data, '\n')
 
-	n.mutex.Lock()
+	n.mutex.RLock()
 	conn, exists := n.Peers[peerAddress]
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 	if !exists {
 		n.updatePeerStatus(peerAddress, false, true)
 		return
@@ -289,6 +373,7 @@ func (n *Node) sendPing(peerAddress string) {
 	}
 }
 
+// sendPong отправляет pong-сообщение в ответ на ping
 func (n *Node) sendPong(conn net.Conn) {
 	msg := NetworkMessage{
 		Type:    "pong",
@@ -307,6 +392,7 @@ func (n *Node) sendPong(conn net.Conn) {
 	conn.Write(data)
 }
 
+// broadcastMessage рассылает сообщение всем пирам
 func (n *Node) broadcastMessage(msg NetworkMessage) {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -315,12 +401,12 @@ func (n *Node) broadcastMessage(msg NetworkMessage) {
 	}
 	data = append(data, '\n')
 
-	n.mutex.Lock()
+	n.mutex.RLock()
 	peers := make(map[string]net.Conn, len(n.Peers))
 	for addr, conn := range n.Peers {
 		peers[addr] = conn
 	}
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 
 	if len(peers) == 0 {
 		fmt.Printf("Node %s has no peers to broadcast %s to\n", n.Address, msg.Type)
@@ -344,6 +430,7 @@ func (n *Node) broadcastMessage(msg NetworkMessage) {
 	}
 }
 
+// disconnectPeer отключает пира
 func (n *Node) disconnectPeer(peerAddress string) {
 	n.mutex.Lock()
 	if conn, exists := n.Peers[peerAddress]; exists {
@@ -353,6 +440,7 @@ func (n *Node) disconnectPeer(peerAddress string) {
 	n.mutex.Unlock()
 }
 
+// handlePeerList обрабатывает полученный список пиров
 func (n *Node) handlePeerList(peers []string) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
@@ -367,6 +455,7 @@ func (n *Node) handlePeerList(peers []string) {
 	}
 }
 
+// isEphemeralPort проверяет, является ли порт эфемерным
 func isEphemeralPort(addr string) bool {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -379,6 +468,7 @@ func isEphemeralPort(addr string) bool {
 	return p > 49152
 }
 
+// updatePeerStatus обновляет статус пира
 func (n *Node) updatePeerStatus(peerAddress string, active bool, failedPing bool) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
@@ -409,15 +499,13 @@ func (n *Node) updatePeerStatus(peerAddress string, active bool, failedPing bool
 	}
 }
 
-func (n *Node) handleNewBlock(block Block) {
-	n.blockchainMutex.Lock()
-	defer n.blockchainMutex.Unlock()
-
-	lastBlock := n.Blockchain.Chain[len(n.Blockchain.Chain)-1]
+// handleNewBlock обрабатывает новый блок, полученный от пира
+func (n *Node) handleNewBlock(block blockchain.Block) {
+	lastBlock := n.Blockchain.GetLastBlock()
 	fmt.Printf("Node %s processing new block %d (PrevHash: %s, Expected: %s)\n",
 		n.Address, block.Index, block.PrevHash, lastBlock.Hash)
 
-	calculatedHash := calculateHash(block)
+	calculatedHash := blockchain.CalculateHash(block)
 	if block.Hash != calculatedHash {
 		fmt.Printf("Node %s rejected block %d: invalid hash (Expected: %s, Got: %s)\n",
 			n.Address, block.Index, calculatedHash, block.Hash)
@@ -431,9 +519,12 @@ func (n *Node) handleNewBlock(block Block) {
 	}
 
 	if block.Index == lastBlock.Index+1 && block.PrevHash == lastBlock.Hash {
-		n.Blockchain.Chain = append(n.Blockchain.Chain, block)
-		fmt.Printf("Node %s accepted new block %d\n", n.Address, block.Index)
-		go n.BroadcastBlockWithRetry(block)
+		chain := n.Blockchain.GetChain()
+		chain = append(chain, block)
+		if n.Blockchain.UpdateChain(chain) {
+			fmt.Printf("Node %s accepted new block %d\n", n.Address, block.Index)
+			go n.BroadcastBlockWithRetry(block)
+		}
 	} else {
 		fmt.Printf("Node %s out of sync for block %d (index %d vs %d, prevHash mismatch)\n",
 			n.Address, block.Index, block.Index, lastBlock.Index+1)
@@ -441,7 +532,8 @@ func (n *Node) handleNewBlock(block Block) {
 	}
 }
 
-func (n *Node) BroadcastBlock(block Block) {
+// BroadcastBlock рассылает новый блок всем пирам
+func (n *Node) BroadcastBlock(block blockchain.Block) {
 	msg := NetworkMessage{
 		Type:    "new_block",
 		Payload: mustMarshal(block),
@@ -449,7 +541,8 @@ func (n *Node) BroadcastBlock(block Block) {
 	n.broadcastMessage(msg)
 }
 
-func (n *Node) BroadcastBlockWithRetry(block Block) {
+// BroadcastBlockWithRetry рассылает новый блок всем пирам с повторными попытками
+func (n *Node) BroadcastBlockWithRetry(block blockchain.Block) {
 	msg := NetworkMessage{
 		Type:    "new_block",
 		Payload: mustMarshal(block),
@@ -457,6 +550,7 @@ func (n *Node) BroadcastBlockWithRetry(block Block) {
 	n.broadcastMessageWithRetry(msg, MaxBroadcastRetries)
 }
 
+// broadcastMessageWithRetry рассылает сообщение с повторными попытками
 func (n *Node) broadcastMessageWithRetry(msg NetworkMessage, retries int) {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -465,12 +559,12 @@ func (n *Node) broadcastMessageWithRetry(msg NetworkMessage, retries int) {
 	}
 	data = append(data, '\n')
 
-	n.mutex.Lock()
+	n.mutex.RLock()
 	peers := make(map[string]net.Conn, len(n.Peers))
 	for addr, conn := range n.Peers {
 		peers[addr] = conn
 	}
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 
 	if len(peers) == 0 {
 		fmt.Printf("Node %s has no peers to broadcast %s to\n", n.Address, msg.Type)
@@ -513,6 +607,7 @@ func (n *Node) broadcastMessageWithRetry(msg NetworkMessage, retries int) {
 	}
 }
 
+// requestChain запрашивает цепочку блоков у пира
 func (n *Node) requestChain(peerAddress string) {
 	msg := NetworkMessage{
 		Type:    "chain_request",
@@ -525,7 +620,7 @@ func (n *Node) requestChain(peerAddress string) {
 	}
 	data = append(data, '\n')
 
-	n.mutex.Lock()
+	n.mutex.RLock()
 	if conn, exists := n.Peers[peerAddress]; exists {
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout))
@@ -533,27 +628,26 @@ func (n *Node) requestChain(peerAddress string) {
 		conn.Write(data)
 		fmt.Printf("Node %s requested chain from %s\n", n.Address, peerAddress)
 	}
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 }
 
+// requestChainFromPeers запрашивает цепочку блоков у всех пиров
 func (n *Node) requestChainFromPeers() {
-	n.mutex.Lock()
+	n.mutex.RLock()
 	peers := make([]string, 0, len(n.Peers))
 	for addr := range n.Peers {
 		peers = append(peers, addr)
 	}
-	n.mutex.Unlock()
+	n.mutex.RUnlock()
 
 	for _, peer := range peers {
 		n.requestChain(peer)
 	}
 }
 
+// sendChain отправляет цепочку блоков пиру
 func (n *Node) sendChain(conn net.Conn) {
-	n.blockchainMutex.Lock()
-	chain := make([]Block, len(n.Blockchain.Chain))
-	copy(chain, n.Blockchain.Chain)
-	n.blockchainMutex.Unlock()
+	chain := n.Blockchain.GetChain()
 
 	msg := NetworkMessage{
 		Type:    "chain_response",
@@ -572,44 +666,28 @@ func (n *Node) sendChain(conn net.Conn) {
 	fmt.Printf("Node %s sent chain (length %d) to %s\n", n.Address, len(chain), conn.RemoteAddr().String())
 }
 
-func (n *Node) handleChainResponse(chain []Block) {
-	n.blockchainMutex.Lock()
-	defer n.blockchainMutex.Unlock()
-
-	currentLength := len(n.Blockchain.Chain)
-	newLength := len(chain)
-	fmt.Printf("Node %s received chain response (length %d, current %d)\n", n.Address, newLength, currentLength)
-
-	if newLength <= currentLength {
-		fmt.Printf("Node %s ignored chain response: not longer than current chain\n", n.Address)
-		return
-	}
-
-	valid := true
-	expectedPrevHash := "0"
-	for i, block := range chain {
-		if block.PrevHash != expectedPrevHash {
-			valid = false
-			fmt.Printf("Node %s rejected chain: prevHash mismatch at block %d (Expected: %s, Got: %s)\n",
-				n.Address, i, expectedPrevHash, block.PrevHash)
-			break
-		}
-		if block.Hash != calculateHash(block) {
-			valid = false
-			fmt.Printf("Node %s rejected chain: invalid hash at block %d\n", n.Address, i)
-			break
-		}
-		expectedPrevHash = block.Hash
-	}
-
-	if valid {
-		n.Blockchain.Chain = chain
-		fmt.Printf("Node %s updated chain to length %d\n", n.Address, newLength)
+// handleChainResponse обрабатывает полученную цепочку блоков
+func (n *Node) handleChainResponse(chain []blockchain.Block) {
+	if n.Blockchain.UpdateChain(chain) {
+		fmt.Printf("Node %s updated chain to length %d\n", n.Address, len(chain))
 	} else {
-		fmt.Printf("Node %s rejected chain response: invalid chain\n", n.Address)
+		fmt.Printf("Node %s rejected chain response: invalid chain or not longer than current\n", n.Address)
 	}
 }
 
+// GetPeers возвращает список активных пиров
+func (n *Node) GetPeers() []PeerInfo {
+	n.mutex.RLock()
+	defer n.mutex.RUnlock()
+
+	peers := make([]PeerInfo, 0, len(n.KnownPeers))
+	for _, info := range n.KnownPeers {
+		peers = append(peers, info)
+	}
+	return peers
+}
+
+// mustMarshal маршалит данные и паникует при ошибке
 func mustMarshal(v interface{}) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
