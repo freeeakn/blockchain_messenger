@@ -385,7 +385,7 @@ func TestHandleChainResponse(t *testing.T) {
 		Messages:  []blockchain.Message{{Sender: "Alice", Recipient: "Bob", Content: "Test1", Timestamp: time.Now().Unix()}},
 		PrevHash:  longerChain[0].Hash,
 	}
-	longerChain[1].Hash = blockchain.CalculateHash(longerChain[1])
+	longerChain[1].Hash = blockchain.SimpleCalculateHash(longerChain[1])
 
 	longerChain[2] = blockchain.Block{
 		Index:     2,
@@ -393,7 +393,7 @@ func TestHandleChainResponse(t *testing.T) {
 		Messages:  []blockchain.Message{{Sender: "Bob", Recipient: "Alice", Content: "Test2", Timestamp: time.Now().Unix()}},
 		PrevHash:  longerChain[1].Hash,
 	}
-	longerChain[2].Hash = blockchain.CalculateHash(longerChain[2])
+	longerChain[2].Hash = blockchain.SimpleCalculateHash(longerChain[2])
 
 	// Обрабатываем ответ
 	node.handleChainResponse(longerChain)
@@ -426,7 +426,7 @@ func TestHandleNewBlock(t *testing.T) {
 		PrevHash:  bc.Chain[0].Hash,
 		Nonce:     42,
 	}
-	newBlock.Hash = blockchain.CalculateHash(newBlock)
+	newBlock.Hash = blockchain.SimpleCalculateHash(newBlock)
 
 	// Обрабатываем новый блок
 	node.handleNewBlock(newBlock)
@@ -454,7 +454,7 @@ func TestHandleNewBlock(t *testing.T) {
 		PrevHash:  "invalid_prev_hash",
 		Nonce:     42,
 	}
-	invalidBlock.Hash = blockchain.CalculateHash(invalidBlock)
+	invalidBlock.Hash = blockchain.SimpleCalculateHash(invalidBlock)
 
 	// Обрабатываем невалидный блок
 	node.handleNewBlock(invalidBlock)

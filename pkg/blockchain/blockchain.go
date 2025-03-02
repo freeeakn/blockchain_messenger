@@ -47,15 +47,15 @@ func NewBlockchain() *Blockchain {
 		Messages:  []Message{},
 		PrevHash:  "0",
 	}
-	genesisBlock.Hash = CalculateHash(genesisBlock)
+	genesisBlock.Hash = SimpleCalculateHash(genesisBlock)
 	return &Blockchain{
 		Chain:      []Block{genesisBlock},
 		Difficulty: 4,
 	}
 }
 
-// CalculateHash вычисляет хеш блока
-func CalculateHash(block Block) string {
+// SimpleCalculateHash вычисляет хеш блока (простая реализация)
+func SimpleCalculateHash(block Block) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d%d%v%s%d", block.Index, block.Timestamp, block.Messages, block.PrevHash, block.Nonce)
 	h := sha256.Sum256([]byte(sb.String()))
@@ -87,8 +87,9 @@ func (bc *Blockchain) AddMessage(sender, recipient, content string, key []byte) 
 		PrevHash:  lastBlock.Hash,
 	}
 
-	newBlock = MineBlock(newBlock, bc.Difficulty)
-	bc.Chain = append(bc.Chain, newBlock)
+	// Используем простой майнинг блока
+	minedBlock := SimpleMineBlock(newBlock, bc.Difficulty)
+	bc.Chain = append(bc.Chain, minedBlock)
 	return nil
 }
 
@@ -116,11 +117,11 @@ func (bc *Blockchain) ReadMessages(recipient string, key []byte) []string {
 	return messages
 }
 
-// MineBlock выполняет майнинг блока с заданной сложностью
-func MineBlock(block Block, difficulty int) Block {
+// SimpleMineBlock выполняет простой майнинг блока с заданной сложностью (устаревший метод)
+func SimpleMineBlock(block Block, difficulty int) Block {
 	target := strings.Repeat("0", difficulty)
 	for {
-		hash := CalculateHash(block)
+		hash := SimpleCalculateHash(block)
 		if hash[:difficulty] == target {
 			block.Hash = hash
 			return block
@@ -137,7 +138,7 @@ func (bc *Blockchain) VerifyChain() bool {
 	for i := 1; i < len(bc.Chain); i++ {
 		current := bc.Chain[i]
 		previous := bc.Chain[i-1]
-		if current.Hash != CalculateHash(current) || current.PrevHash != previous.Hash {
+		if current.Hash != SimpleCalculateHash(current) || current.PrevHash != previous.Hash {
 			return false
 		}
 	}
@@ -177,7 +178,7 @@ func (bc *Blockchain) UpdateChain(newChain []Block) bool {
 			valid = false
 			break
 		}
-		if block.Hash != CalculateHash(block) {
+		if block.Hash != SimpleCalculateHash(block) {
 			valid = false
 			break
 		}

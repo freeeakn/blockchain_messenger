@@ -22,6 +22,7 @@ func main() {
 	peer := flag.String("peer", "", "Initial peer address to connect to (e.g., 192.168.1.101:3000)")
 	name := flag.String("name", "User", "Your username")
 	keyStr := flag.String("key", "", "Shared encryption key (hex-encoded, 32 bytes); if empty, one will be generated")
+	enableDiscovery := flag.Bool("discovery", false, "Enable automatic node discovery using mDNS")
 	flag.Parse()
 
 	// Инициализация ключа шифрования
@@ -50,6 +51,12 @@ func main() {
 
 	bc := blockchain.NewBlockchain()
 	node := network.NewNode(*address, bc, bootstrapPeers)
+
+	// Включаем автоматическое обнаружение узлов, если указан флаг
+	if *enableDiscovery {
+		fmt.Println("Включено автоматическое обнаружение узлов через mDNS")
+		node.EnableDiscovery()
+	}
 
 	// Запуск узла
 	if err := node.Start(); err != nil {
@@ -82,7 +89,7 @@ func main() {
 
 	// Интерактивный режим
 	fmt.Printf("Welcome, %s! Running on %s\n", *name, *address)
-	fmt.Println("Commands: send <recipient> <message>, read, peers, blocks, debug, quit")
+	fmt.Println("Commands: send <recipient> <message>, read, peers, blocks, debug, discovery, quit")
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -112,12 +119,14 @@ func main() {
 			handleBlocksCommand(bc)
 		case "debug":
 			handleDebugCommand(*address, bc, node)
+		case "discovery":
+			handleDiscoveryCommand(node, parts)
 		case "quit":
 			fmt.Println("Shutting down...")
 			node.Stop()
 			return
 		default:
-			fmt.Println("Unknown command. Available: send, read, peers, blocks, debug, quit")
+			fmt.Println("Unknown command. Available: send, read, peers, blocks, debug, discovery, quit")
 		}
 	}
 }
@@ -244,4 +253,35 @@ func handleDebugCommand(address string, bc *blockchain.Blockchain, node *network
 	fmt.Printf("  Known peers: %d\n", knownPeerCount)
 	fmt.Printf("  Last block hash: %s\n", lastBlockHash)
 	fmt.Println("Debug command completed")
+}
+
+// handleDiscoveryCommand обрабатывает команду управления обнаружением узлов
+func handleDiscoveryCommand(node *network.Node, parts []string) {
+	fmt.Println("Processing 'discovery' command...")
+
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "on":
+			node.EnableDiscovery()
+			fmt.Println("Автоматическое обнаружение узлов включено")
+		case "off":
+			node.DisableDiscovery()
+			fmt.Println("Автоматическое обнаружение узлов выключено")
+		default:
+			fmt.Println("Неизвестная подкоманда. Доступные: on, off, list")
+		}
+	}
+
+	// Выводим список обнаруженных узлов
+	fmt.Println("Узлы, обнаруженные через mDNS:")
+	discoveredNodes := node.GetDiscoveredNodes()
+	if len(discoveredNodes) == 0 {
+		fmt.Println("  Узлы не обнаружены")
+	} else {
+		for _, addr := range discoveredNodes {
+			fmt.Printf("  %s\n", addr)
+		}
+	}
+
+	fmt.Println("Discovery command completed")
 }

@@ -35,6 +35,8 @@ type Node struct {
 	listener       net.Listener
 	shutdown       chan struct{}
 	isRunning      bool
+	discovery      *MDNSDiscovery
+	useDiscovery   bool
 }
 
 // Константы для настройки сетевого взаимодействия
@@ -64,6 +66,7 @@ func NewNode(address string, bc *blockchain.Blockchain, bootstrapPeers []string)
 		Blockchain:     bc,
 		bootstrapPeers: bootstrapPeers,
 		shutdown:       make(chan struct{}),
+		useDiscovery:   false,
 	}
 }
 
@@ -86,6 +89,14 @@ func (n *Node) Start() error {
 	n.KnownPeers[n.Address] = PeerInfo{Address: n.Address, LastSeen: time.Now(), Active: true}
 	n.mutex.Unlock()
 
+	// Запускаем автоматическое обнаружение узлов, если оно включено
+	if n.useDiscovery {
+		n.discovery = NewMDNSDiscovery(n)
+		if err := n.discovery.Start(); err != nil {
+			fmt.Printf("Warning: Failed to start mDNS discovery: %v\n", err)
+		}
+	}
+
 	go n.bootstrapDiscovery()
 	go n.broadcastPeerList()
 	go n.probePeers()
@@ -103,6 +114,11 @@ func (n *Node) Stop() {
 	close(n.shutdown)
 	if n.listener != nil {
 		n.listener.Close()
+	}
+
+	// Останавливаем сервис обнаружения, если он запущен
+	if n.discovery != nil {
+		n.discovery.Stop()
 	}
 
 	n.mutex.Lock()
@@ -505,7 +521,7 @@ func (n *Node) handleNewBlock(block blockchain.Block) {
 	fmt.Printf("Node %s processing new block %d (PrevHash: %s, Expected: %s)\n",
 		n.Address, block.Index, block.PrevHash, lastBlock.Hash)
 
-	calculatedHash := blockchain.CalculateHash(block)
+	calculatedHash := blockchain.SimpleCalculateHash(block)
 	if block.Hash != calculatedHash {
 		fmt.Printf("Node %s rejected block %d: invalid hash (Expected: %s, Got: %s)\n",
 			n.Address, block.Index, calculatedHash, block.Hash)
@@ -695,4 +711,32 @@ func mustMarshal(v interface{}) json.RawMessage {
 		return nil
 	}
 	return data
+}
+
+// EnableDiscovery включает автоматическое обнаружение узлов
+func (n *Node) EnableDiscovery() {
+	n.useDiscovery = true
+	if n.isRunning && n.discovery == nil {
+		n.discovery = NewMDNSDiscovery(n)
+		if err := n.discovery.Start(); err != nil {
+			fmt.Printf("Warning: Failed to start mDNS discovery: %v\n", err)
+		}
+	}
+}
+
+// DisableDiscovery выключает автоматическое обнаружение узлов
+func (n *Node) DisableDiscovery() {
+	n.useDiscovery = false
+	if n.discovery != nil {
+		n.discovery.Stop()
+		n.discovery = nil
+	}
+}
+
+// GetDiscoveredNodes возвращает список узлов, обнаруженных через mDNS
+func (n *Node) GetDiscoveredNodes() []string {
+	if n.discovery != nil {
+		return n.discovery.GetDiscoveredNodes()
+	}
+	return []string{}
 }
