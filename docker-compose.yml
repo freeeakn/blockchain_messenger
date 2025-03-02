@@ -1,0 +1,58 @@
+version: '3'
+
+services:
+  # Первый узел - лидер сети
+  node1:
+    build: .
+    container_name: aetherwave-node1
+    ports:
+      - "3000:3000"
+    volumes:
+      - node1-data:/app/data
+    environment:
+      - NODE_NAME=Node1
+    command: --address :3000 --name Node1
+
+  # Второй узел, подключается к первому
+  node2:
+    build: .
+    container_name: aetherwave-node2
+    ports:
+      - "3001:3000"
+    volumes:
+      - node2-data:/app/data
+    environment:
+      - NODE_NAME=Node2
+    command: --address :3000 --name Node2 --peer node1:3000
+    depends_on:
+      - node1
+
+  # Третий узел, подключается к первому
+  node3:
+    build: .
+    container_name: aetherwave-node3
+    ports:
+      - "3002:3000"
+    volumes:
+      - node3-data:/app/data
+    environment:
+      - NODE_NAME=Node3
+    command: --address :3000 --name Node3 --peer node1:3000
+    depends_on:
+      - node1
+
+  # Веб-интерфейс для взаимодействия с узлами
+  web-ui:
+    build: ./web
+    container_name: aetherwave-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - node1
+      - node2
+      - node3
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data: 

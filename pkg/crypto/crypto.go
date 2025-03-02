@@ -1,4 +1,4 @@
-package main
+package crypto
 
 import (
 	"crypto/aes"
@@ -8,7 +8,8 @@ import (
 	"io"
 )
 
-func encryptMessage(content string, key []byte) ([]byte, error) {
+// EncryptMessage шифрует сообщение с использованием AES-CFB
+func EncryptMessage(content string, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %v", err)
@@ -24,7 +25,8 @@ func encryptMessage(content string, key []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
-func decryptMessage(ciphertext, key []byte) (string, error) {
+// DecryptMessage дешифрует сообщение с использованием AES-CFB
+func DecryptMessage(ciphertext, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %v", err)
@@ -37,4 +39,14 @@ func decryptMessage(ciphertext, key []byte) (string, error) {
 	stream := cipher.NewCFBDecrypter(block, iv)
 	stream.XORKeyStream(ciphertext, ciphertext)
 	return string(ciphertext), nil
+}
+
+// GenerateKey генерирует новый ключ шифрования
+func GenerateKey() ([]byte, error) {
+	key := make([]byte, 32) // AES-256 требует 32-байтовый ключ
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate key: %v", err)
+	}
+	return key, nil
 }
