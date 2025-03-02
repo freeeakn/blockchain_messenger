@@ -95,8 +95,8 @@ func profileCPU(outputFile string, messageCount int, duration time.Duration, dif
 			key,
 		)
 		if err != nil {
-			log.Printf("Ошибка добавления сообщения: %v", err)
-			continue
+			fmt.Printf("Ошибка при добавлении сообщения: %v\n", err)
+			break
 		}
 		messagesAdded++
 
@@ -135,8 +135,8 @@ func profileMemory(outputFile string, messageCount int, duration time.Duration, 
 			key,
 		)
 		if err != nil {
-			log.Printf("Ошибка добавления сообщения: %v", err)
-			continue
+			fmt.Printf("Ошибка при добавлении сообщения: %v\n", err)
+			break
 		}
 		messagesAdded++
 
@@ -195,8 +195,8 @@ func profileBlockCreation(outputFile string, blockCount int, difficulty int) {
 				key,
 			)
 			if err != nil {
-				log.Printf("Ошибка добавления сообщения: %v", err)
-				continue
+				fmt.Printf("Ошибка при добавлении сообщения: %v\n", err)
+				break
 			}
 		}
 

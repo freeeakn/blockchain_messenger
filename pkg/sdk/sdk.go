@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 
@@ -245,68 +245,57 @@ func (c *Client) AddPeer(address string) error {
 
 // Внутренние вспомогательные методы
 
-// makeRequest выполняет HTTP-запрос с повторными попытками
+// makeRequest выполняет HTTP-запрос к API узла
 func (c *Client) makeRequest(method, url string, body interface{}, result interface{}) error {
-	var jsonBody []byte
+	var reqBody []byte
 	var err error
-
-	if body != nil {
-		jsonBody, err = json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("ошибка маршализации JSON: %v", err)
-		}
-	}
-
 	var req *http.Request
+
 	if body != nil {
-		req, err = http.NewRequest(method, url, bytes.NewBuffer(jsonBody))
+		reqBody, err = json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("ошибка маршалинга JSON: %w", err)
+		}
+		req, err = http.NewRequest(method, c.nodeURL+url, bytes.NewBuffer(reqBody))
 	} else {
-		req, err = http.NewRequest(method, url, nil)
+		req, err = http.NewRequest(method, c.nodeURL+url, nil)
 	}
 
 	if err != nil {
-		return fmt.Errorf("ошибка создания запроса: %v", err)
+		return fmt.Errorf("ошибка создания запроса: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Выполняем запрос с повторными попытками
 	var resp *http.Response
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	var retries int
+
+	for retries = 0; retries <= c.maxRetries; retries++ {
 		resp, err = c.httpClient.Do(req)
-		if err == nil && resp.StatusCode < 500 {
+		if err == nil {
 			break
 		}
-
-		if attempt < c.maxRetries {
-			time.Sleep(c.retryDelay)
-			continue
+		if retries == c.maxRetries {
+			return fmt.Errorf("ошибка выполнения запроса после %d попыток: %w", retries, err)
 		}
-
-		if err != nil {
-			return fmt.Errorf("ошибка выполнения запроса после %d попыток: %v", c.maxRetries+1, err)
-		}
+		time.Sleep(c.retryDelay)
 	}
 
-	if resp == nil {
-		return fmt.Errorf("не удалось получить ответ после %d попыток", c.maxRetries+1)
-	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		return fmt.Errorf("ошибка HTTP: %d - %s", resp.StatusCode, string(bodyBytes))
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ошибка API: %s (код %d)", string(bodyBytes), resp.StatusCode)
 	}
 
 	if result != nil {
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return fmt.Errorf("ошибка чтения ответа: %v", err)
+			return fmt.Errorf("ошибка чтения ответа: %w", err)
 		}
-
 		err = json.Unmarshal(bodyBytes, result)
 		if err != nil {
-			return fmt.Errorf("ошибка демаршализации JSON: %v", err)
+			return fmt.Errorf("ошибка демаршалинга JSON: %w", err)
 		}
 	}
 

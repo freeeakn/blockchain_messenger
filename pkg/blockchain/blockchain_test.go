@@ -122,10 +122,18 @@ func TestReadMessages(t *testing.T) {
 	key := make([]byte, 32) // Нулевой ключ для тестирования
 
 	// Добавляем несколько сообщений с разными получателями
-	bc.AddMessage("Alice", "Bob", "Hello, Bob!", key)
-	bc.AddMessage("Charlie", "Bob", "Hey Bob, how are you?", key)
-	bc.AddMessage("Bob", "Alice", "Hi Alice!", key)
-	bc.AddMessage("Dave", "Eve", "Hello Eve!", key)
+	if err := bc.AddMessage("Alice", "Bob", "Hello, Bob!", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
+	if err := bc.AddMessage("Charlie", "Bob", "Hey Bob, how are you?", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
+	if err := bc.AddMessage("Bob", "Alice", "Hi Alice!", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
+	if err := bc.AddMessage("Dave", "Eve", "Hello Eve!", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
 
 	// Читаем сообщения для Bob
 	bobMessages := bc.ReadMessages("Bob", key)
@@ -176,8 +184,12 @@ func TestVerifyChain(t *testing.T) {
 	key := make([]byte, 32) // Нулевой ключ для тестирования
 
 	// Добавляем несколько сообщений для создания блоков
-	bc.AddMessage("Alice", "Bob", "Hello, Bob!", key)
-	bc.AddMessage("Charlie", "Bob", "Hey Bob, how are you?", key)
+	if err := bc.AddMessage("Alice", "Bob", "Hello, Bob!", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
+	if err := bc.AddMessage("Charlie", "Bob", "Hey Bob, how are you?", key); err != nil {
+		t.Fatalf("Failed to add message: %v", err)
+	}
 
 	// Проверяем, что цепочка валидна
 	if !bc.VerifyChain() {
@@ -246,8 +258,12 @@ func TestUpdateChain(t *testing.T) {
 	key := make([]byte, 32) // Нулевой ключ для тестирования
 
 	// Добавляем блоки в bc2, делая его длиннее bc1
-	bc2.AddMessage("Alice", "Bob", "Hello from bc2!", key)
-	bc2.AddMessage("Charlie", "Dave", "Another message in bc2", key)
+	if err := bc2.AddMessage("Alice", "Bob", "Hello from bc2!", key); err != nil {
+		t.Fatalf("Failed to add message to bc2: %v", err)
+	}
+	if err := bc2.AddMessage("Charlie", "Dave", "Another message in bc2", key); err != nil {
+		t.Fatalf("Failed to add message to bc2: %v", err)
+	}
 
 	// Получаем копию цепочки bc2
 	longerChain := bc2.GetChain()
